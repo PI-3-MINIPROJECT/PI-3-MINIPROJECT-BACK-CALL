@@ -1,3 +1,10 @@
+/**
+ * Socket.IO configuration and event handlers for voice calls
+ * @module config/socket
+ * @description Handles all Socket.IO events for real-time voice communication,
+ * including room management, WebRTC signaling, and participant state management.
+ */
+
 import { Server as HTTPServer } from 'http';
 import { Server, Socket } from 'socket.io';
 import {
@@ -14,7 +21,7 @@ import { logger } from '../utils/logger';
 /**
  * In-memory storage for active call rooms with their participants
  * @type {Map<string, Map<string, CallParticipant>>}
- * @description Key: meetingId, Value: Map of participants where key is oderId and value is CallParticipant
+ * @description Key: meetingId, Value: Map of participants where key is userId and value is CallParticipant
  */
 const callRooms = new Map<string, Map<string, CallParticipant>>();
 
@@ -34,8 +41,13 @@ const MAX_PARTICIPANTS = parseInt(process.env.MAX_PARTICIPANTS || '10', 10);
 
 /**
  * Initialize Socket.IO server for voice calls
- * @param {HTTPServer} httpServer - HTTP server instance
- * @returns {Server} Socket.IO server instance
+ * @param {HTTPServer} httpServer - HTTP server instance to attach Socket.IO to
+ * @returns {Server} Configured Socket.IO server instance with all event handlers
+ * @description Sets up Socket.IO server with CORS configuration and registers all event handlers
+ * for voice call operations including join, leave, signaling, and mute/unmute events.
+ * @example
+ * const httpServer = createServer(app);
+ * const io = initializeSocketIO(httpServer);
  */
 export const initializeSocketIO = (httpServer: HTTPServer): Server => {
   const corsOriginEnv = process.env.CORS_ORIGIN || 'http://localhost:5173';
@@ -55,7 +67,9 @@ export const initializeSocketIO = (httpServer: HTTPServer): Server => {
 
   /**
    * Handle socket connection
-   * @param {Socket} socket - Socket instance
+   * @param {Socket} socket - Socket instance representing a client connection
+   * @description Sets up event listeners for all voice call operations when a client connects.
+   * Automatically sends ICE server configuration to the client upon connection.
    */
   io.on(CallEvents.CONNECTION, (socket: Socket) => {
     logger.socket('connection', `New connection: ${socket.id}`);
@@ -65,6 +79,12 @@ export const initializeSocketIO = (httpServer: HTTPServer): Server => {
 
     /**
      * Handle user joining a voice call
+     * @param {JoinCallPayload} payload - Payload containing meetingId, userId, peerId, and username
+     * @description Validates the payload, creates or joins a call room, and notifies other participants.
+     * Sends the list of existing peers to the newly joined participant.
+     * @fires CallEvents#PEERS_LIST - Emitted to the joining participant with list of existing peers
+     * @fires CallEvents#PEER_JOINED - Emitted to all other participants when a new peer joins
+     * @fires CallEvents#ERROR - Emitted if validation fails or room is full
      */
     socket.on(CallEvents.JOIN, (payload: JoinCallPayload) => {
       try {
@@ -162,6 +182,11 @@ export const initializeSocketIO = (httpServer: HTTPServer): Server => {
 
     /**
      * Handle WebRTC signaling (offer, answer, ICE candidates)
+     * @param {SignalPayload} payload - Payload containing signaling data and target user information
+     * @description Forwards WebRTC signaling messages between peers. The server acts as a relay
+     * for SDP offers, answers, and ICE candidates to establish peer-to-peer connections.
+     * @fires CallEvents#SIGNAL - Emitted to the target peer with the signaling data
+     * @fires CallEvents#ERROR - Emitted if room, target user, or payload is invalid
      */
     socket.on(CallEvents.SIGNAL, (payload: SignalPayload) => {
       try {
@@ -222,6 +247,10 @@ export const initializeSocketIO = (httpServer: HTTPServer): Server => {
 
     /**
      * Handle user muting their microphone
+     * @param {MutePayload} payload - Payload containing meetingId and userId
+     * @description Updates the participant's mute status and broadcasts the change to all
+     * participants in the call room.
+     * @fires CallEvents#MUTE_STATUS - Emitted to all participants in the room with updated mute status
      */
     socket.on(CallEvents.MUTE, (payload: MutePayload) => {
       try {
@@ -257,6 +286,10 @@ export const initializeSocketIO = (httpServer: HTTPServer): Server => {
 
     /**
      * Handle user unmuting their microphone
+     * @param {MutePayload} payload - Payload containing meetingId and userId
+     * @description Updates the participant's mute status and broadcasts the change to all
+     * participants in the call room.
+     * @fires CallEvents#MUTE_STATUS - Emitted to all participants in the room with updated mute status
      */
     socket.on(CallEvents.UNMUTE, (payload: MutePayload) => {
       try {
@@ -292,6 +325,10 @@ export const initializeSocketIO = (httpServer: HTTPServer): Server => {
 
     /**
      * Handle user leaving a voice call
+     * @param {LeaveCallPayload} payload - Payload containing meetingId and userId
+     * @description Removes the participant from the call room and notifies other participants.
+     * Cleans up empty rooms automatically.
+     * @fires CallEvents#PEER_LEFT - Emitted to all remaining participants when a user leaves
      */
     socket.on(CallEvents.LEAVE, (payload: LeaveCallPayload) => {
       handleUserLeave(socket, io, payload.meetingId, payload.userId);
@@ -299,6 +336,8 @@ export const initializeSocketIO = (httpServer: HTTPServer): Server => {
 
     /**
      * Handle socket disconnection
+     * @description Automatically handles user leave when socket disconnects unexpectedly.
+     * Uses the socket-to-user mapping to identify which user left and clean up their resources.
      */
     socket.on(CallEvents.DISCONNECT, () => {
       const userInfo = socketToUser.get(socket.id);
@@ -316,10 +355,15 @@ export const initializeSocketIO = (httpServer: HTTPServer): Server => {
 
 /**
  * Handle user leaving a call (either explicitly or on disconnect)
- * @param {Socket} socket - Socket instance
- * @param {Server} io - Socket.IO server instance
- * @param {string} meetingId - Meeting/room ID
- * @param {string} userId - User ID
+ * @param {Socket} socket - Socket instance of the leaving user
+ * @param {Server} io - Socket.IO server instance for broadcasting events
+ * @param {string} meetingId - Meeting/room identifier
+ * @param {string} userId - User identifier of the leaving participant
+ * @returns {void}
+ * @description Removes the participant from the call room, cleans up socket mappings,
+ * and notifies all remaining participants. Automatically deletes empty rooms to free memory.
+ * @fires CallEvents#PEER_LEFT - Emitted to all remaining participants in the room
+ * @private
  */
 function handleUserLeave(
   socket: Socket,
@@ -370,15 +414,24 @@ function handleUserLeave(
 
 /**
  * Get the number of active call rooms
- * @returns {number} Number of active rooms
+ * @returns {number} Total number of active call rooms currently in memory
+ * @description Returns the count of distinct meeting rooms that have at least one participant.
+ * @example
+ * const activeCalls = getActiveCallsCount();
+ * // Returns: 5 (if there are 5 active call rooms)
  */
 export const getActiveCallsCount = (): number => {
   return callRooms.size;
 };
 
 /**
- * Get the total number of users in calls
- * @returns {number} Total number of users
+ * Get the total number of users across all active call rooms
+ * @returns {number} Total number of participants in all call rooms
+ * @description Iterates through all active call rooms and sums up the total number of participants.
+ * Useful for server statistics and monitoring.
+ * @example
+ * const totalUsers = getTotalUsersInCalls();
+ * // Returns: 23 (if there are 23 total participants across all rooms)
  */
 export const getTotalUsersInCalls = (): number => {
   let total = 0;
@@ -389,9 +442,14 @@ export const getTotalUsersInCalls = (): number => {
 };
 
 /**
- * Get call room info
- * @param {string} meetingId - Meeting ID
- * @returns {object | null} Room info or null
+ * Get call room information including participants list
+ * @param {string} meetingId - Meeting/room identifier
+ * @returns {Object | null} Room information object with meetingId, participant count, and user list, or null if room doesn't exist
+ * @description Retrieves detailed information about a specific call room, including all participants
+ * and their current mute status. Returns null if the room doesn't exist or has no active participants.
+ * @example
+ * const roomInfo = getCallRoomInfo('meeting-123');
+ * // Returns: { meetingId: 'meeting-123', participants: 3, users: [...] }
  */
 export const getCallRoomInfo = (meetingId: string): {
   meetingId: string;
