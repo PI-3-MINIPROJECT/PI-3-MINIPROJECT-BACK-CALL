@@ -295,21 +295,25 @@ export const getIceServers = (): IceServer[] => {
 
   // Add ExpressTURN STUN/TURN server if configured
   if (turnUrl) {
-    // STUN from ExpressTURN
+    // Extract hostname (without port) for TURNS
+    const turnHost = turnUrl.split(':')[0];
+
+    // STUN from ExpressTURN (uses full URL with port)
     iceServers.push({
       urls: `stun:${turnUrl}`,
     });
 
     // TURN from ExpressTURN (if credentials provided)
     if (turnUsername && turnCredential) {
+      // TURN UDP/TCP (uses full URL with port)
       iceServers.push({
         urls: `turn:${turnUrl}`,
         username: turnUsername,
         credential: turnCredential,
       });
-      // Also add TURNS (TLS) for better firewall traversal
+      // TURNS (TLS) for better firewall traversal - uses port 443
       iceServers.push({
-        urls: `turns:${turnUrl}:443`,
+        urls: `turns:${turnHost}:443`,
         username: turnUsername,
         credential: turnCredential,
       });
