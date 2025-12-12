@@ -6,10 +6,10 @@
  */
 
 /**
- * Represents a participant in a voice call room
+ * Represents a participant in a media call room (audio + video)
  * @interface CallParticipant
- * @description Contains all information about a user connected to a voice call,
- * including their socket connection, peer ID for WebRTC, and mute status.
+ * @description Contains all information about a user connected to a call,
+ * including their socket connection, peer ID for WebRTC, and media states.
  */
 export interface CallParticipant {
   /** Unique Socket.IO socket identifier */
@@ -24,6 +24,8 @@ export interface CallParticipant {
   username: string;
   /** Whether the participant's microphone is currently muted */
   isMuted: boolean;
+  /** Whether the participant's camera is currently on */
+  isVideoOn: boolean;
   /** ISO 8601 timestamp of when the participant joined the call */
   joinedAt: string;
 }
@@ -95,6 +97,19 @@ export interface MutePayload {
 }
 
 /**
+ * Payload for video on/off actions
+ * @interface VideoPayload
+ * @description Sent when a user turns their camera on or off.
+ * The server broadcasts this status change to all other participants.
+ */
+export interface VideoPayload {
+  /** Meeting/room identifier where the video action occurred */
+  meetingId: string;
+  /** User identifier of the participant changing video status */
+  userId: string;
+}
+
+/**
  * Response containing the list of peers in a call
  * @interface PeersListResponse
  * @description Sent to a newly joined participant containing information about
@@ -113,6 +128,8 @@ export interface PeersListResponse {
     username: string;
     /** Current mute status */
     isMuted: boolean;
+    /** Current video status */
+    isVideoOn: boolean;
     /** ISO 8601 timestamp of when they joined */
     joinedAt: string;
   }>;
@@ -172,6 +189,23 @@ export interface MuteStatusNotification {
 }
 
 /**
+ * Notification broadcast when a participant's video status changes
+ * @interface VideoStatusNotification
+ * @description Sent to all participants in a call when someone turns their camera on or off.
+ * Used to update UI indicators showing who has their camera active.
+ */
+export interface VideoStatusNotification {
+  /** User identifier of the participant who changed status */
+  userId: string;
+  /** Display name of the participant */
+  username: string;
+  /** New video status (true = camera on, false = camera off) */
+  isVideoOn: boolean;
+  /** ISO 8601 timestamp of the status change */
+  timestamp: string;
+}
+
+/**
  * Error response sent to clients
  * @interface CallError
  * @description Standard error format sent when an operation fails.
@@ -185,9 +219,9 @@ export interface CallError {
 }
 
 /**
- * Socket.IO event names for voice call operations
+ * Socket.IO event names for media call operations (audio + video)
  * @enum {string} CallEvents
- * @description Enumeration of all socket event names used in the voice call system.
+ * @description Enumeration of all socket event names used in the media call system.
  * Using an enum ensures consistency between client and server implementations.
  */
 export enum CallEvents {
@@ -196,9 +230,9 @@ export enum CallEvents {
   /** Socket.IO built-in disconnection event */
   DISCONNECT = 'disconnect',
   
-  /** Client requests to join a voice call room */
+  /** Client requests to join a call room */
   JOIN = 'call:join',
-  /** Client requests to leave a voice call room */
+  /** Client requests to leave a call room */
   LEAVE = 'call:leave',
   
   /** WebRTC signaling message (offer, answer, or ICE candidate) */
@@ -209,6 +243,11 @@ export enum CallEvents {
   /** Client unmutes their microphone */
   UNMUTE = 'call:unmute',
   
+  /** Client turns on their camera */
+  VIDEO_ON = 'call:video-on',
+  /** Client turns off their camera */
+  VIDEO_OFF = 'call:video-off',
+  
   /** Server notifies clients that a new peer has joined */
   PEER_JOINED = 'call:peer-joined',
   /** Server notifies clients that a peer has left */
@@ -217,6 +256,8 @@ export enum CallEvents {
   PEERS_LIST = 'call:peers-list',
   /** Server broadcasts a participant's mute status change */
   MUTE_STATUS = 'call:mute-status',
+  /** Server broadcasts a participant's video status change */
+  VIDEO_STATUS = 'call:video-status',
   
   /** Server sends an error message to a client */
   ERROR = 'call:error',
@@ -238,16 +279,74 @@ export interface IceServer {
 }
 
 /**
- * Default ICE servers configuration using Google's public STUN servers
+ * Get ICE servers configuration from environment or use defaults
+ * @function getIceServers
+ * @description Returns ICE server configuration for WebRTC connections.
+ * Uses ExpressTURN credentials from environment variables if available,
+ * otherwise falls back to public STUN servers.
+ * @returns {IceServer[]} Array of ICE server configurations
+ */
+export const getIceServers = (): IceServer[] => {
+  const turnUrl = process.env.TURN_SERVER_URL;
+  const turnUsername = process.env.TURN_USERNAME;
+  const turnCredential = process.env.TURN_CREDENTIAL;
+
+  const iceServers: IceServer[] = [];
+
+  // Add ExpressTURN STUN/TURN server if configured
+  if (turnUrl) {
+    // STUN from ExpressTURN
+    iceServers.push({
+      urls: `stun:${turnUrl}`,
+    });
+
+    // TURN from ExpressTURN (if credentials provided)
+    if (turnUsername && turnCredential) {
+      iceServers.push({
+        urls: `turn:${turnUrl}`,
+        username: turnUsername,
+        credential: turnCredential,
+      });
+      // Also add TURNS (TLS) for better firewall traversal
+      iceServers.push({
+        urls: `turns:${turnUrl}:443`,
+        username: turnUsername,
+        credential: turnCredential,
+      });
+    }
+  }
+
+  // Fallback: Add public STUN servers if no TURN configured
+  if (iceServers.length === 0) {
+    iceServers.push(
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+    );
+  }
+
+  return iceServers;
+};
+
+/**
+ * Default ICE servers - use getIceServers() instead for dynamic configuration
  * @constant {IceServer[]}
- * @description Array of public Google STUN servers for NAT traversal.
- * These servers are free to use and have high availability.
- * STUN servers help peers discover their public IP addresses when behind NAT.
+ * @deprecated Use getIceServers() function instead
  */
 export const DEFAULT_ICE_SERVERS: IceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun2.l.google.com:19302' },
-  { urls: 'stun:stun3.l.google.com:19302' },
-  { urls: 'stun:stun4.l.google.com:19302' },
 ];
+
+/**
+ * Media type for call connections
+ * @enum {string} MediaType
+ * @description Defines the types of media that can be transmitted in a call.
+ */
+export enum MediaType {
+  /** Audio only transmission */
+  AUDIO = 'audio',
+  /** Video only transmission */
+  VIDEO = 'video',
+  /** Both audio and video transmission */
+  AUDIO_VIDEO = 'audio_video',
+}
