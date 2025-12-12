@@ -14,7 +14,8 @@ import {
   LeaveCallPayload,
   SignalPayload,
   MutePayload,
-  DEFAULT_ICE_SERVERS,
+  VideoPayload,
+  getIceServers,
 } from '../types';
 import { logger } from '../utils/logger';
 
@@ -74,8 +75,8 @@ export const initializeSocketIO = (httpServer: HTTPServer): Server => {
   io.on(CallEvents.CONNECTION, (socket: Socket) => {
     logger.socket('connection', `New connection: ${socket.id}`);
 
-    // Send ICE servers configuration to client
-    socket.emit('call:ice-servers', DEFAULT_ICE_SERVERS);
+    // Send ICE servers configuration to client (includes ExpressTURN if configured)
+    socket.emit('call:ice-servers', getIceServers());
 
     /**
      * Handle user joining a voice call
@@ -131,6 +132,7 @@ export const initializeSocketIO = (httpServer: HTTPServer): Server => {
             peerId,
             username: username || 'Anonymous',
             isMuted: true, // Start muted by default
+            isVideoOn: false, // Start with camera off by default
             joinedAt: new Date().toISOString(),
           };
           room.set(userId, participant);
@@ -151,6 +153,7 @@ export const initializeSocketIO = (httpServer: HTTPServer): Server => {
             peerId: p.peerId,
             username: p.username,
             isMuted: p.isMuted,
+            isVideoOn: p.isVideoOn,
             joinedAt: p.joinedAt,
           }));
 
@@ -324,7 +327,85 @@ export const initializeSocketIO = (httpServer: HTTPServer): Server => {
     });
 
     /**
-     * Handle user leaving a voice call
+     * Handle user turning on their camera
+     * @param {VideoPayload} payload - Payload containing meetingId and userId
+     * @description Updates the participant's video status and broadcasts the change to all
+     * participants in the call room.
+     * @fires CallEvents#VIDEO_STATUS - Emitted to all participants in the room with updated video status
+     */
+    socket.on(CallEvents.VIDEO_ON, (payload: VideoPayload) => {
+      try {
+        const { meetingId, userId } = payload;
+
+        if (!meetingId || !userId) {
+          return;
+        }
+
+        const room = callRooms.get(meetingId);
+        if (!room) return;
+
+        const participant = room.get(userId);
+        if (!participant) return;
+
+        // Update video status
+        participant.isVideoOn = true;
+
+        // Broadcast video status to all participants in the room
+        io.to(meetingId).emit(CallEvents.VIDEO_STATUS, {
+          userId,
+          username: participant.username,
+          isVideoOn: true,
+          timestamp: new Date().toISOString(),
+        });
+
+        logger.call('video-on', `User ${participant.username} turned on camera in call ${meetingId}`);
+
+      } catch (error) {
+        logger.error('Error handling video on', error);
+      }
+    });
+
+    /**
+     * Handle user turning off their camera
+     * @param {VideoPayload} payload - Payload containing meetingId and userId
+     * @description Updates the participant's video status and broadcasts the change to all
+     * participants in the call room.
+     * @fires CallEvents#VIDEO_STATUS - Emitted to all participants in the room with updated video status
+     */
+    socket.on(CallEvents.VIDEO_OFF, (payload: VideoPayload) => {
+      try {
+        const { meetingId, userId } = payload;
+
+        if (!meetingId || !userId) {
+          return;
+        }
+
+        const room = callRooms.get(meetingId);
+        if (!room) return;
+
+        const participant = room.get(userId);
+        if (!participant) return;
+
+        // Update video status
+        participant.isVideoOn = false;
+
+        // Broadcast video status to all participants in the room
+        io.to(meetingId).emit(CallEvents.VIDEO_STATUS, {
+          userId,
+          username: participant.username,
+          isVideoOn: false,
+          timestamp: new Date().toISOString(),
+        });
+
+        logger.call('video-off', `User ${participant.username} turned off camera in call ${meetingId}`);
+
+      } catch (error) {
+        logger.error('Error handling video off', error);
+      }
+    });
+
+    /**
+     * Handle user leaving a call
      * @param {LeaveCallPayload} payload - Payload containing meetingId and userId
      * @description Removes the participant from the call room and notifies other participants.
      * Cleans up empty rooms automatically.
@@ -446,7 +527,7 @@ export const getTotalUsersInCalls = (): number => {
  * @param {string} meetingId - Meeting/room identifier
  * @returns {Object | null} Room information object with meetingId, participant count, and user list, or null if room doesn't exist
  * @description Retrieves detailed information about a specific call room, including all participants
- * and their current mute status. Returns null if the room doesn't exist or has no active participants.
+ * and their current mute and video status. Returns null if the room doesn't exist or has no active participants.
  * @example
  * const roomInfo = getCallRoomInfo('meeting-123');
  * // Returns: { meetingId: 'meeting-123', participants: 3, users: [...] }
@@ -454,7 +535,7 @@ export const getTotalUsersInCalls = (): number => {
 export const getCallRoomInfo = (meetingId: string): {
   meetingId: string;
   participants: number;
-  users: Array<{ userId: string; username: string; isMuted: boolean }>;
+  users: Array<{ userId: string; username: string; isMuted: boolean; isVideoOn: boolean }>;
 } | null => {
   const room = callRooms.get(meetingId);
   if (!room) return null;
@@ -466,6 +547,7 @@ export const getCallRoomInfo = (meetingId: string): {
       userId: p.userId,
       username: p.username,
       isMuted: p.isMuted,
+      isVideoOn: p.isVideoOn,
     })),
   };
 };
